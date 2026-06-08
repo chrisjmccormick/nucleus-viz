@@ -33,7 +33,8 @@ from pathlib import Path
 
 MODEL_ID = "Qwen/Qwen2.5-Math-1.5B"
 PASSK_NAME = "math500_passK"             # naturally-sampled pool in the HF dataset
-PROBLEM_ID = "test/geometry/627.json"
+UNIQUE_ID = "math500/geometry/9467"      # split-aware id (HF MATH-500 geometry/627)
+PROBLEM_ID = "test/geometry/627.json"    # HF MATH-500 native id (for prompt text + title)
 DEFAULT_SAMPLE_IDX = 10                   # shortest correct "To solve ..." rollout
 
 DEFAULT_MAX_ROW_WIDTH_PX = 1024
@@ -209,10 +210,10 @@ def select_rollout(sample_idx: int) -> dict:
     from math_rollouts.data.hf import load_generation_parquet
 
     df = load_generation_parquet(MODEL_ID, PASSK_NAME)
-    g = df[(df.math500_native_id == PROBLEM_ID) & (df.sample_idx == sample_idx)]
+    g = df[(df.unique_id == UNIQUE_ID) & (df.sample_idx == sample_idx)]
     if len(g) != 1:
         raise SystemExit(
-            f"expected exactly 1 rollout for {PROBLEM_ID} sample_idx={sample_idx}, "
+            f"expected exactly 1 rollout for {UNIQUE_ID} sample_idx={sample_idx}, "
             f"got {len(g)}"
         )
     r = g.iloc[0]
