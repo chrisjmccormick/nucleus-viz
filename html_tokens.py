@@ -1,26 +1,28 @@
 """Token-probability chip strip for one MATH-500 rollout (Qwen2.5-Math-1.5B).
 
 Pulls a real, naturally-sampled rollout for ``geometry/627`` from the
-``math-rollouts`` HF dataset, recomputes the per-token nucleus along it
-(teacher-forced HF forward pass, T=0.6 / top_p=0.95 / top_k=20 — the dataset's
-canonical config), and writes standalone HTML where each generated token is a chip
-showing the chosen token plus its nucleus alternates, colored by probability.
+``math-rollouts`` HF dataset and writes standalone HTML where each generated token
+is a chip showing the chosen token plus its nucleus alternates, colored by
+probability (T=0.6 / top_p=0.95 / top_k=20 — the dataset's canonical config).
 
-The expensive step is the forward pass; its output (the per-token trace) is cached
-to ``data/`` so tweaking the visual never re-runs the model. Re-run it with
-``--regen``.
+The per-token nuclei come from one of two sources (``--source``):
+  * **store** (preferred): the precomputed per-token nucleus shards in the
+    math-rollouts dataset (``<pool>_token_nuclei/``) — no model, no GPU.
+  * **generate**: a teacher-forced bf16 HF forward pass (``trace_nuclei``).
+``auto`` (default) tries the store and falls back to generating if it isn't there
+yet. Either way the resulting trace is cached to ``data/`` so tweaking the visual
+never recomputes; rebuild with ``--regen``.
 
 Default rollout: the shortest CORRECT, cleanly-reasoned sample for geometry/627 —
 ``math500_passK`` sample_idx=10, which opens "To solve this problem ..." and works
 through to ``\\boxed{17}``.
 
-Data comes through the math-rollouts interface (``pip install -e ../math-rollouts``):
-    from math_rollouts.data.hf import load_generation_parquet
-    from math_rollouts.nucleus import trace_nuclei
+Data comes through the math-rollouts interface (``pip install -e ../math-rollouts``).
 
 Usage:
-    python html_tokens.py                 # uses the cached trace if present
-    python html_tokens.py --regen         # recompute the trace (loads the model)
+    python html_tokens.py                 # cached trace if present, else store/generate
+    python html_tokens.py --regen         # rebuild (store if available, else model)
+    python html_tokens.py --source generate --regen   # force the model path
 """
 from __future__ import annotations
 
@@ -217,6 +219,7 @@ def select_rollout(sample_idx: int) -> dict:
     if not bool(r.is_correct):
         print(f"WARNING: selected rollout (sample_idx={sample_idx}) is NOT correct")
     return {
+        "unique_id": str(r.unique_id),               # math12k id, for the store lookup
         "completion_token_ids": [int(t) for t in r.completion_token_ids],
         "completion_text": str(r.completion_text),
         "answer": str(r.answer),
@@ -224,6 +227,72 @@ def select_rollout(sample_idx: int) -> dict:
         "sample_idx": int(r.sample_idx),
         "is_correct": bool(r.is_correct),
     }
+
+
+def pull_trace_from_store(rollout: dict, *, pool: str = PASSK_NAME) -> tuple[list[dict], dict]:
+    """Rebuild the trace from the math-rollouts per-token nucleus store — no model.
+
+    The store keeps, per position, the kept token ids + raw logits (nucleus members
+    first, ``nuc_sizes`` of them, plus a few out-of-nucleus alternates). The chip
+    probabilities are the nucleus renormalized — ``softmax(logit/T)`` over the
+    nucleus members — which needs only the stored nucleus logits. The chosen token
+    comes from the rollout; its prob is 0 if it fell outside the recomputed nucleus.
+    Raises if the store shard isn't present (caller falls back to generating)."""
+    import math
+
+    from transformers import AutoTokenizer
+
+    from math_rollouts.config import GenConfig
+    from math_rollouts.data.hf import load_token_nuclei
+
+    df = load_token_nuclei(MODEL_ID, pool, rollout["unique_id"])
+    g = df[df.sample_idx == rollout["sample_idx"]]
+    if len(g) != 1:
+        raise FileNotFoundError(
+            f"no stored nuclei row for {rollout['unique_id']} sample_idx="
+            f"{rollout['sample_idx']}")
+    row = g.iloc[0]
+
+    cfg = GenConfig()
+    T = cfg.temperature
+    tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+    nuc_sizes = [int(x) for x in row["nuc_sizes"]]
+    keep_counts = [int(x) for x in row["keep_counts"]]
+    kept_ids = [int(x) for x in row["kept_ids"]]
+    kept_logits = [float(x) for x in row["kept_logits"]]
+    chosen_ids = rollout["completion_token_ids"]
+    if len(nuc_sizes) != len(chosen_ids):
+        raise ValueError(f"store ({len(nuc_sizes)}) / rollout ({len(chosen_ids)}) "
+                         "length mismatch")
+
+    trace, off = [], 0
+    for t, kc in enumerate(keep_counts):
+        size = nuc_sizes[t]
+        ids = kept_ids[off:off + size]              # nucleus members come first
+        logits = kept_logits[off:off + size]
+        off += kc
+        mx = max(logits)
+        exps = [math.exp((l - mx) / T) for l in logits]
+        Z = sum(exps)
+        probs = [e / Z for e in exps]               # renormalized within the nucleus
+        chosen = int(chosen_ids[t])
+        chosen_prob = probs[ids.index(chosen)] if chosen in ids else 0.0
+        trace.append({
+            "step": t, "chosen_id": chosen, "chosen_str": tok.decode([chosen]),
+            "chosen_prob": float(chosen_prob), "nuc_ids": ids,
+            "nuc_probs": [float(p) for p in probs],
+            "nuc_strs": [tok.decode([i]) for i in ids],
+        })
+
+    meta = {
+        "model_id": MODEL_ID, "problem_id": PROBLEM_ID, "answer": rollout["answer"],
+        "sample_idx": rollout["sample_idx"], "is_correct": rollout["is_correct"],
+        "num_tokens": rollout["num_tokens"], "gen_config": cfg.as_dict(),
+        "eos_id": int(tok.eos_token_id), "completion_text": rollout["completion_text"],
+        "source": "store",
+    }
+    return trace, meta
 
 
 def compute_trace(rollout: dict, *, device: str) -> tuple[list[dict], dict]:
@@ -333,20 +402,35 @@ def main() -> None:
                     help="render only the first N steps (default: the whole rollout)")
     ap.add_argument("--max-per-col", type=int, default=MAX_PER_COL)
     ap.add_argument("--device", default=None, help="cuda | cpu (default: auto)")
+    ap.add_argument("--source", choices=["auto", "store", "generate"], default="auto",
+                    help="auto (default): pull the per-token nuclei from the "
+                         "math-rollouts store, fall back to generating them via the "
+                         "model; store: require the store; generate: always recompute")
     ap.add_argument("--regen", action="store_true",
-                    help="recompute the trace even if the cache exists")
+                    help="rebuild the trace even if the cache exists")
     args = ap.parse_args()
 
     if args.cache.exists() and not args.regen:
         print(f"loading cached trace from {args.cache}")
         trace, meta = load_trace(args.cache)
     else:
-        device = args.device
-        if device is None:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
         rollout = select_rollout(args.sample_idx)
-        trace, meta = compute_trace(rollout, device=device)
+        trace = meta = None
+        if args.source in ("auto", "store"):
+            try:
+                trace, meta = pull_trace_from_store(rollout)
+                print(f"pulled per-token nuclei from the math-rollouts store "
+                      f"({len(trace)} steps)")
+            except Exception as e:               # store missing / not yet generated
+                if args.source == "store":
+                    raise
+                print(f"store unavailable ({type(e).__name__}: {e}); generating instead")
+        if trace is None:
+            device = args.device
+            if device is None:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            trace, meta = compute_trace(rollout, device=device)
         save_trace(args.cache, trace, meta)
 
     # Drop a trailing EOS step (present when the rollout finished on "stop"): it
