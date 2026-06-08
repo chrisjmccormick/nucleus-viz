@@ -305,12 +305,12 @@ def compute_trace(rollout: dict, *, device: str) -> tuple[list[dict], dict]:
 
     from math_rollouts.adapters.qwen_math import QwenMathAdapter
     from math_rollouts.config import GenConfig
-    from math_rollouts.data.problems import load_math500_by_ids
+    from math_rollouts.data.problems import load_problems_by_ids
     from math_rollouts.nucleus import trace_nuclei
 
-    problem = load_math500_by_ids([PROBLEM_ID])
+    problem = load_problems_by_ids([UNIQUE_ID])
     if not problem:
-        raise SystemExit(f"{PROBLEM_ID} not found in MATH-500")
+        raise SystemExit(f"{UNIQUE_ID} not found in math_problems")
     problem = problem[0]
 
     # bfloat16 ON BOTH cpu/cuda — deliberately, not fp32. The rollouts were sampled
