@@ -1,0 +1,10 @@
+torch
+transformers
+matplotlib
+numpy
+datasets
+pandas
+pyarrow
+huggingface_hub
+# html_tokens.py consumes the math-rollouts dataset + trace_nuclei primitive:
+#   pip install -e ../math-rollouts
