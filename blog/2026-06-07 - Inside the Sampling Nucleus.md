@@ -1,4 +1,4 @@
-# Where Does a Language Model's First Token Come From?
+# Inside the Sampling Nucleus
 
 When a language model answers a question, every token it produces starts as a
 vote over its **entire vocabulary**. Qwen2.5-Math-1.5B has 151,936 tokens to
@@ -10,11 +10,6 @@ So what does that vote actually look like? We took one MATH-500 problem
 template, ran a single forward pass, and looked at the distribution over the
 very first response token.
 
-To see all 151,936 numbers at once, we lay them out in concentric square rings:
-the highest-scoring token sits in the **center**, and tokens spiral outward in
-rank order. The center is "most likely," the corners are "least likely." Color
-encodes the value in each cell.
-
 ---
 
 ## 1. The raw logits: a smooth landscape
@@ -23,11 +18,50 @@ The model's raw output is a **logit** — one real number per token. Higher mean
 "more plausible here." Plotted across the whole vocabulary, the logits form a
 smooth gradient: bright in the middle, fading gently toward the edges.
 
+To see all 151,936 numbers at once, we lay them out in concentric square rings:
+the highest-scoring token sits in the **center**, and tokens spiral outward in
+rank order. The center is "most likely," the corners are "least likely." Color
+encodes the value in each cell.
+
 ![Raw logits across the full vocabulary](figures/geometry_627/Vocab-01-Raw_Logits.png)
 
 Nothing dramatic yet. Neighboring tokens have similar logits, and the surface
-slopes gradually from the best token down to the worst. If you stopped here,
-you might guess the model is fairly undecided — lots of tokens look "close."
+slopes gradually from the best token down to the worst. 
+
+## 3. Temperature: widening (or narrowing) the gaps
+
+- The next step in sampling is to apply a coefficient to the logits which ultimately sharpens the distribution.
+- This coefficient is called the **temperature** `T`.
+- Interestingly, a temperature of `1.0` is very (permissive?) For reasoning tasks in particular, we'll use a lower temperature, `0.6` here.
+
+- Greedy decoding, where we simply take the token with the highest logit (argmax of the logits) can also be expressed by setting the temperature to ~0.0, (which turns the value into infinity)
+
+- We'll see in the next section that what matters for SoftMax are the deltas--the gaps between the logit values. 
+
+Dividing by a number smaller than 1 makes everything bigger — and, crucially,
+it stretches the **gaps**. Watch three logits at `T = 0.6`:
+
+| logit | ÷ 0.6 |
+|------:|------:|
+| 15    | 25.00 |
+| 10    | 16.67 |
+| 5     | 8.33  |
+
+The values 15 and 10 were 5 apart; after dividing by 0.6 they're 8.33 apart.
+Every gap is multiplied by `1 / 0.6 ≈ 1.67`. Temperatures **below 1 sharpen**
+the distribution (wider gaps, more decisive); temperatures **above 1 flatten**
+it; `T = 1` changes nothing.
+
+![Logits after temperature scaling](figures/geometry_627/Vocab-02-Temp0.6.png)
+
+(TODO - It's not invisible.)
+
+On the same linear color scale this looks almost identical to the raw logits —
+dividing by a constant is just a rescale. The effect is invisible *here*. But
+remember the previous section: softmax is about to exponentiate these gaps, and a
+1.67× stretch in the gaps becomes an enormous swing in the final probabilities.
+
+If you stopped here, you might guess the model is fairly undecided — lots of tokens look "close."
 
 That intuition is wrong, and the reason is what we do with these scores next.
 
@@ -53,6 +87,9 @@ e^2 = 2.72 × 2.72
 e^3 = 2.72 × 2.72 × 2.72
 ```
 
+TODO: List the top four token's logits and their exp(logit) value
+
+
 So a token whose logit is just **1 point** higher than another isn't slightly
 more likely — it's about **2.72×** more likely. Two points higher:
 `2.72 × 2.72 ≈ 7.4×`. Ten points higher: over **22,000×**. A gently sloping
@@ -61,33 +98,8 @@ logit landscape, pushed through `e^x`, turns into a spike.
 One more property worth noting: softmax only cares about the **differences**
 between logits, not their absolute size. Adding the same constant to every logit
 cancels out in the numerator and denominator. All that matters is how far each
-token sits below the leader.
-
-## 3. Temperature: widening (or narrowing) the gaps
-
-Because only the gaps matter, we get a single knob for how decisive the model
-is: divide every logit by a **temperature** `T` before the softmax.
-
-Dividing by a number smaller than 1 makes everything bigger — and, crucially,
-it stretches the **gaps**. Watch three logits at `T = 0.6`:
-
-| logit | ÷ 0.6 |
-|------:|------:|
-| 15    | 25.00 |
-| 10    | 16.67 |
-| 5     | 8.33  |
-
-The values 15 and 10 were 5 apart; after dividing by 0.6 they're 8.33 apart.
-Every gap is multiplied by `1 / 0.6 ≈ 1.67`. Temperatures **below 1 sharpen**
-the distribution (wider gaps, more decisive); temperatures **above 1 flatten**
-it; `T = 1` changes nothing.
-
-![Logits after temperature scaling](figures/geometry_627/Vocab-02-Temp0.6.png)
-
-On the same linear color scale this looks almost identical to the raw logits —
-dividing by a constant is just a rescale. The effect is invisible *here*. But
-remember the previous section: softmax is about to exponentiate these gaps, and a
-1.67× stretch in the gaps becomes an enormous swing in the final probabilities.
+token sits below the leader. 
+(TODO - More interesting point--you could shift the logits to be all positive, 0 - 30 instead of -15 to 15, and the softmax would still be the same.)
 
 ## 4. Put them together: the probability collapses
 
