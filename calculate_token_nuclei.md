@@ -111,13 +111,20 @@ pip_url = f"git+https://{_auth}github.com/{GH_OWNER}/math-rollouts.git"
 - `LIMIT` — cap the number of rollouts. `None` processes the whole pool; a few
   thousand already pins the singleton fraction tightly, so set e.g. `2000` for a
   quick pass first.
+- `SHARD_SIZE` — problems per output parquet. `1` (per-problem) is right for
+  `math500_passK` (500 small files the viz can load one at a time); bump it (e.g.
+  `50`) for the larger `math12k` pools to avoid thousands of tiny files.
+- `LOGIT_DTYPE` — `float16` (default, halves the logit bytes and matches the bf16
+  compute precision) or `float32` if your `pyarrow` can't write float16.
 
 <!-- code -->
 ```python
-MODEL_ID = "Qwen/Qwen2.5-Math-1.5B"
-POOL     = "math500_passK"
-LIMIT    = None
-OUT_ROOT = "/content/math-rollouts-data"
+MODEL_ID    = "Qwen/Qwen2.5-Math-1.5B"
+POOL        = "math500_passK"
+LIMIT       = None
+SHARD_SIZE  = 1
+LOGIT_DTYPE = "float16"
+OUT_ROOT    = "/content/math-rollouts-data"
 ```
 
 <!-- md -->
@@ -125,10 +132,15 @@ OUT_ROOT = "/content/math-rollouts-data"
 
 `build_token_nuclei` pulls the pool + problem text from the HF dataset (cached
 locally on first use), teacher-forces every rollout on the GPU in length-packed
-batches, and computes the nucleus size at each generated token. It writes
-`<POOL>_token_nuclei.parquet` (one row per rollout, per-token size lists) and
-`<POOL>_nuclei_stats.json` under `OUT_ROOT/generations/<model-slug>/`, prints the
-headline numbers, and returns `(df, stats, paths)`.
+batches, and at each generated token records the nucleus size plus a frugal slice
+of the distribution: **top-2** for singletons (so you can see if the runner-up had
+any mass) and **10–20** for branch tokens (the nucleus plus a few alternates just
+outside it). Per kept entry it stores the raw logit + token id.
+
+It writes per-problem shards under
+`OUT_ROOT/generations/<model-slug>/<POOL>_token_nuclei/`, plus `_stats.json` (the
+headline numbers) and `_meta.json` (model / engine / dtype / keep-rule), and
+returns `(stats, paths)`.
 
 Recompute precision is **bfloat16**, matching the vLLM engine that generated the
 rollouts (some first-token logits are nearly tied, so fp32 would reshuffle the
@@ -138,9 +150,11 @@ nucleus).
 ```python
 from math_rollouts.analysis.token_nuclei import build_token_nuclei
 
-df, stats, paths = build_token_nuclei(
+stats, paths = build_token_nuclei(
     MODEL_ID, POOL, OUT_ROOT,
     limit=LIMIT,
+    shard_size=SHARD_SIZE,
+    logit_dtype=LOGIT_DTYPE,
     device="cuda",
 )
 ```
@@ -184,9 +198,10 @@ plt.show()
 <!-- md -->
 # Push results to the HF dataset
 
-Uploads the per-token parquet and the stats JSON to
-`generations/<model-slug>/` in `<HF_USERNAME>/math-rollouts`. Needs the
-write-scoped `HF_TOKEN` from the Secrets cell.
+Uploads the whole `<POOL>_token_nuclei/` shard directory (per-problem parquets +
+`_stats.json` + `_meta.json`) to `generations/<model-slug>/` in
+`<HF_USERNAME>/math-rollouts`. Needs the write-scoped `HF_TOKEN` from the Secrets
+cell.
 
 <!-- code -->
 ```python
@@ -196,15 +211,14 @@ from math_rollouts.data.hf import model_slug
 api = HfApi(token=HF_TOKEN)
 repo_id = f"{HF_USERNAME}/math-rollouts"
 slug = model_slug(MODEL_ID)
+dest = f"generations/{slug}/{paths['dir'].name}"
 
-for p in (paths["parquet"], paths["stats"]):
-    dest = f"generations/{slug}/{p.name}"
-    url = api.upload_file(
-        path_or_fileobj=str(p),
-        path_in_repo=dest,
-        repo_id=repo_id,
-        repo_type="dataset",
-        commit_message=f"Add {p.name} (per-token nucleus sizes for {POOL})",
-    )
-    print("uploaded", dest, "->", url)
+api.upload_folder(
+    folder_path=str(paths["dir"]),
+    path_in_repo=dest,
+    repo_id=repo_id,
+    repo_type="dataset",
+    commit_message=f"Add per-token nucleus store for {POOL} ({stats['n_rollouts']} rollouts)",
+)
+print("uploaded", dest)
 ```
