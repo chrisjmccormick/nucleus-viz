@@ -140,6 +140,14 @@ Reading the right reasoning is not the same as being able to produce it. The mod
 
 And this is exactly the point where the RL and FT pictures snap together. Under nucleus sampling, a token outside the nucleus doesn't have a *small* probability of being generated--it has **zero**. The model will never write that "8" on its own, which means no rollout will ever contain it, which means no reward signal can ever reach it. On-policy RL is structurally incapable of teaching this lesson. Teacher forcing is the only mechanism that can put loss on that token--and when it does, the loss is enormous: the biggest per-token losses here run ~3x the largest ones RL produces on this same problem.
 
+I ran the gradient experiment on these tokens too, expecting the gradients to also come out 3x bigger. They don't--and the reason is a property of cross-entropy worth knowing: **its gradient saturates even though its loss doesn't.** The push on the target's logit is proportional to $(p - 1)$, which is bounded--at $p = 3\text{e-}5$ it's $\approx -1.0$, barely harder than at $p = 0.18$. So " first" carries 3.4x the loss of our branch token " understand", but a slightly *smaller* gradient. Past a point, being more wrong doesn't push harder; cross-entropy's push maxes out at "wrong," and the thing that actually scales RL's updates beyond it is the advantage multiplier.
+
+<!-- IMG: F7 — graphviz gradient stacks for the SFT tokens (Name / first / 8 / 7).
+     Source: figures/geometry_627_grad_layers_sft.png -->
+![PLACEHOLDER F7: SFT per-layer gradient norms](TODO-F7)
+
+What the FT update *does* have is perfect aim. At the "8", the two largest gradients in the LM head are the "8" row, pushed up--and the "9" row, the model's wrong singleton ($p = 0.81$), pushed down. One teacher-forced token simultaneously installs the right digit and dismantles the confident wrong one. And the singleton control behaves exactly like its RL counterpart: the "7" at $p = 0.999$ produces the same near-zero gradient under SFT as " to" did under RL. Singletons are no-ops in both training modes; the difference between RL and FT is entirely about which *non*-singletons each one is allowed to touch.
+
 The two training modes aren't competing tools; they have different jobs:
 
 - **RL re-balances the tree the model already has.** Its signal lives at the branch tokens, and its updates shift probability between options that were already in the nucleus.
