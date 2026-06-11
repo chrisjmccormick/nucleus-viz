@@ -12,6 +12,9 @@
 >   F5  figures/geometry_627_grad_layers.png            (graphviz stacks)
 >   F6  math500_geometry_627_losses_solution.html       (SFT, burgundy OOD chips)
 >   F7  figures/geometry_627_grad_layers_sft.png        (SFT gradient stacks)
+>   F8  figures/geometry_627/Grad-Rows-01-rl-branch.png  (head-row gradients, ring layout;
+>       -02-rl-negative and -03-sft-ood are the A<0 and SFT companions — candidates for
+>       sections 4/5's "which rows" discussion)
 
 ---
 
