@@ -7,6 +7,9 @@
 #      A = +1.81) for five tokens of the correct geometry/627 rollout — the
 #      singleton/branch comparison (steps 7/8/9) plus the probability-matched
 #      deep branch tokens (steps 180/339) for the depth comparison.
+#      Every measurement also records a per-component breakdown inside each
+#      layer: 12 query heads, 2 K / 2 V heads (GQA), 12 o_proj column slices,
+#      MLP gate/up/down, and the two RMSNorms — for the full-model heatmap.
 #   2. SFT gradients: backprop the plain cross-entropy loss (loss = -log p,
 #      no advantage) for four tokens of the teacher-forced dataset solution —
 #      'Name' (OOD opener), ' first' (OOD, the 10.5-nat peak), '8' (OOD, the
@@ -93,6 +96,33 @@ table = model.model.embed_tokens.weight
 assert table is model.lm_head.weight, "expected tied embeddings"
 
 
+def _gnorm(*tensors):
+    return sum(float((t.float() ** 2).sum()) for t in tensors if t is not None) ** 0.5
+
+
+def layer_breakdown(layer, n_heads, n_kv_heads, head_dim):
+    """Per-component grad norms inside one decoder layer. Q/K/V slice by output
+    rows (head dims, bias included); o_proj slices by input columns (per-head
+    contributions). MLP: gate/up (same plane) and down. Plus the two RMSNorms."""
+    attn, mlp = layer.self_attn, layer.mlp
+    qg, qb = attn.q_proj.weight.grad, attn.q_proj.bias.grad
+    kg, kb = attn.k_proj.weight.grad, attn.k_proj.bias.grad
+    vg, vb = attn.v_proj.weight.grad, attn.v_proj.bias.grad
+    og = attn.o_proj.weight.grad
+    sl = lambda h: slice(h * head_dim, (h + 1) * head_dim)
+    return {
+        "q": [_gnorm(qg[sl(h)], qb[sl(h)]) for h in range(n_heads)],
+        "k": [_gnorm(kg[sl(h)], kb[sl(h)]) for h in range(n_kv_heads)],
+        "v": [_gnorm(vg[sl(h)], vb[sl(h)]) for h in range(n_kv_heads)],
+        "o": [_gnorm(og[:, sl(h)]) for h in range(n_heads)],
+        "gate": _gnorm(mlp.gate_proj.weight.grad),
+        "up": _gnorm(mlp.up_proj.weight.grad),
+        "down": _gnorm(mlp.down_proj.weight.grad),
+        "ln1": _gnorm(layer.input_layernorm.weight.grad),
+        "ln2": _gnorm(layer.post_attention_layernorm.weight.grad),
+    }
+
+
 def measure(completion_ids, step, advantage, nuc):
     """Backprop one token's loss and collect per-weight-group gradient norms."""
     target = completion_ids[step]
@@ -107,6 +137,13 @@ def measure(completion_ids, step, advantage, nuc):
     layer_norms = [
         (sum(float((p.grad.float() ** 2).sum())
              for p in layer.parameters() if p.grad is not None)) ** 0.5
+        for layer in model.model.layers
+    ]
+    cfg = model.config
+    head_dim = cfg.hidden_size // cfg.num_attention_heads
+    components = [
+        layer_breakdown(layer, cfg.num_attention_heads,
+                        cfg.num_key_value_heads, head_dim)
         for layer in model.model.layers
     ]
     probs = torch.softmax(logits.detach(), dim=-1)
@@ -128,6 +165,7 @@ def measure(completion_ids, step, advantage, nuc):
         "table_total_norm": total_sq ** 0.5,
         "final_norm_grad": float(model.model.norm.weight.grad.float().norm()),
         "layer_norms": layer_norms,
+        "components": components,
         "top_head_rows": [
             {"token": tok.decode([int(i)]), "row_grad_norm": float(n),
              "softmax_p": float(probs[int(i)])}
