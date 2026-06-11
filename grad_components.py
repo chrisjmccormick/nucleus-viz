@@ -71,7 +71,8 @@ def _fmt(v: float) -> str:
     return f"{v:.0e}"
 
 
-def build_dot(token: dict, num_layers: int, layer_range: tuple[int, int]) -> str:
+def build_dot(token: dict, num_layers: int, layer_range: tuple[int, int],
+              vmax: float | None = None) -> str:
     comps = token["components"]
     lo, hi = layer_range
     all_norms = []
@@ -83,7 +84,9 @@ def build_dot(token: dict, num_layers: int, layer_range: tuple[int, int]) -> str
     if full_stack:
         all_norms += [token["head_out_norm"], token["embed_in_norm"],
                       token["final_norm_grad"]]
-    gmax = max(all_norms)
+    # vmax pins the color scale (and the grey floor, which is a fraction of it)
+    # so figures for different tokens can be compared apples-to-apples.
+    gmax = vmax if vmax is not None else max(all_norms)
 
     n_heads = len(comps[0]["q"])
     n_kv = len(comps[0]["k"])
@@ -198,6 +201,9 @@ def main() -> None:
                          " ' understand')")
     ap.add_argument("--layers", type=int, nargs=2, metavar=("LO", "HI"),
                     default=None, help="render only layers LO..HI")
+    ap.add_argument("--vmax", type=float, default=None,
+                    help="pin the color-scale max (use the same value across "
+                         "figures to compare tokens on one absolute scale)")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -219,9 +225,11 @@ def main() -> None:
         out = (here / "figures" /
                f"geometry_627_grad_components_{kind}_step{args.step}{suffix}")
 
+    if args.vmax is not None:
+        out = out.with_name(out.name + "_shared")
     print(f"rendering step {args.step} ({token['token']!r}, "
           f"loss {token['loss']:.4g}) layers {layer_range[0]}..{layer_range[1]}")
-    render(build_dot(token, num_layers, layer_range), out)
+    render(build_dot(token, num_layers, layer_range, args.vmax), out)
 
 
 if __name__ == "__main__":
