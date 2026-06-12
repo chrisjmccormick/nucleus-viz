@@ -7,7 +7,7 @@
 <!-- md -->
 Reasoning models are surprisingly deterministic in the responses they generate. 
 
-The below illustration shows a response sampled from Qwen2.5-Math-1.5B a challenging geometry problem:
+The below illustration shows a response sampled from Qwen2.5-Math-1.5B for a challenging geometry problem:
 
 > "The coordinates of a parallelogram are (5, 3), (6, 8), (7, 4) and $(x, y)$ and $x > 7$. What is the value of $x + y$?"
 
@@ -25,13 +25,12 @@ We'll refer to the sampling pool at each position as its "nucleus"; this term co
 
 Positions with only a single possible prediction are called "singletons", and we'll refer to the non-singletons as "branch tokens".
 
-The statistics on singletons vs. branches are remarkable. Over a collection of xxx (64 x 500) responses to Math500 benchmark problems (xx million tokens in total):
+The statistics on singletons vs. branches are remarkable. Over a collection of 32,000 (500 x 64) responses to Math500 benchmark problems (~50 million tokens total):
 - **94%** of the tokens are singletons.
-- The branch nuclei are small--their average size is only **xxx**.
-    - TODO - This stat was intended to exclude singletons; redo it.
-- The branches are concentrated towards the beginning of the response. 
+- The branch nuclei are small--most of them have just two tokens, and 91% have 4 or fewer.
+- The branches are (concentrated? something that implies "left-leaning") towards the beginning of the response. 
 
-In this series of posts, we'll review how sampling works and look deeper into these nuclei, then see how this determinism affects the per-token losses during Reinforcement Learning, by looking at the math of per-token losses, and finally look at how recent RL techniques exploit this "low entropy" quality of reasoning models.
+In this series of posts, we'll review how sampling works and look deeper into these nuclei, then see how this determinism affects the per-token losses during Reinforcement Learning by looking at the math of per-token losses, and finally look at how recent RL techniques exploit this "low entropy" quality of reasoning models.
 
 Let's start by reviewing the core concepts of token prediction.
 
@@ -60,60 +59,21 @@ The result is a kind of pyramid shape, with a gradual slope away from the center
 
 Yet, that intuition is actually very wrong, and the reason is the SoftMax. 
 
-Before applying the SoftMax, we apply "Temperature" by dividing every logit by `T = 0.6`. The effect of temperature is easier to understand after we've first we've gained some intuition about the SoftMax, so we'll go there next.
-
-## 3. Temperature: widening (or narrowing) the gaps
-
-- The next step in sampling is to apply a coefficient to the logits which ultimately sharpens the distribution.
-- This coefficient is called the **temperature** `T`.
-- Interestingly, a temperature of `1.0` is very (permissive?) For reasoning tasks in particular, we'll use a lower temperature, `0.6` here.
-
-- Greedy decoding, where we simply take the token with the highest logit (argmax of the logits) can also be expressed by setting the temperature to ~0.0, (which turns the value into infinity)
-
-- We'll see in the next section that what matters for SoftMax are the deltas--the gaps between the logit values. 
-
-Dividing by a number smaller than 1 makes everything bigger — and, crucially,
-it stretches the **gaps**. Watch three logits at `T = 0.6`:
-
-| logit | ÷ 0.6 |
-|------:|------:|
-| 15    | 25.00 |
-| 10    | 16.67 |
-| 5     | 8.33  |
-
-The values 15 and 10 were 5 apart; after dividing by 0.6 they're 8.33 apart.
-Every gap is multiplied by `1 / 0.6 ≈ 1.67`. Temperatures **below 1 sharpen**
-the distribution (wider gaps, more decisive); temperatures **above 1 flatten**
-it; `T = 1` changes nothing.
+Note: Before applying the SoftMax, we apply "Temperature" by dividing every logit by `T = 0.6`, which sharpens our pyramid:
 
 ![Logits after temperature scaling](https://raw.githubusercontent.com/chrisjmccormick/nucleus-viz/main/figures/geometry_627/Vocab-02-Temp0.6.png)
 
-(TODO - It's not invisible.)
-
-On the same linear color scale this looks almost identical to the raw logits —
-dividing by a constant is just a rescale. The effect is invisible *here*. But
-remember the previous section: softmax is about to exponentiate these gaps, and a
-1.67× stretch in the gaps becomes an enormous swing in the final probabilities.
-
-If you stopped here, you might guess the model is fairly undecided — lots of tokens look "close."
-
-That intuition is wrong, and the reason is what we do with these scores next.
+We'll come back to talk about "why" after we've gained some better intuition about SoftMax.
 
 ## 2. Softmax: turning scores into probabilities
 
-Logits aren't probabilities. They can be positive or negative, and they don't
-add up to anything in particular. **Softmax** fixes that: it exponentiates every
-score and divides by the total.
+Softmax normalizes those logits into probabilities. To get the probability for a token, we apply the exp function to its logit $z$ and divide by the sum (TODO, wording... wanting to keep it simple / avoid 'i' and 'j') .
 
-$$p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}$$
+$$p = \frac{e^{z}}{\sum e^{z}}$$
 
-Exponentiating makes every value positive, and dividing by the sum makes them
-add to 1 — a valid probability distribution. But the exponential does something
-more important than bookkeeping: it turns **additive** gaps between scores into
-**multiplicative** ones.
+The deeper insight, though, is that it turns additive differences into multiplicative ones. I needed a spelled out example before I could wrap my head around that. 
 
-Here's the whole trick in three lines. The constant `e ≈ 2.72`, and every time
-the exponent goes up by 1, you multiply by another `e`:
+$e^z$ for logit values 1.0, 2.0, and 3.0:
 
 ```
 e^1 = 2.72
@@ -121,58 +81,40 @@ e^2 = 2.72 × 2.72
 e^3 = 2.72 × 2.72 × 2.72
 ```
 
-TODO: List the top four token's logits and their exp(logit) value
+Add +1 to a token's logit, and you almost triple its numerator in the SoftMax.
 
+In our example nucleus, the top logit is `14.19` for the token "The", and the fifth hightest is `12.06` for "Given". That's a modest 18% difference in logit terms, and about 840% difference in $e^z$.
 
-So a token whose logit is just **1 point** higher than another isn't slightly
-more likely — it's about **2.72×** more likely. Two points higher:
-`2.72 × 2.72 ≈ 7.4×`. Ten points higher: over **22,000×**. A gently sloping
-logit landscape, pushed through `e^x`, turns into a spike.
+TODO: These couple sentences are still AI written, don't feel right.
+So a token whose logit is just 1 point higher than another isn't slightly more likely — it's about 2.72× more likely. Two points higher:
+`2.72 × 2.72 ≈ 7.4×`. Ten points higher: over 22,000×. A gently sloping logit landscape, pushed through `e^z`, turns into a spike.
 
-One more property worth noting: softmax only cares about the **differences**
-between logits, not their absolute size. Adding the same constant to every logit
-cancels out in the numerator and denominator. All that matters is how far each
-token sits below the leader. 
-(TODO - More interesting point--you could shift the logits to be all positive, 0 - 30 instead of -15 to 15, and the softmax would still be the same.)
-
-## 4. Put them together: the probability collapses
-
-Apply softmax to the temperature-scaled logits — `softmax(logits / 0.6)` — and
-that smooth landscape from step 1 collapses. Almost the entire vocabulary rounds
-to a probability of zero, and a single token lights up dead center:
+Here's our updated heatmap for Softmax. For dramatic effect, I overwrote the bottommost color such that any probability lower than ~0.004 is colored black.
 
 ![Softmax probability collapses onto a few tokens](https://raw.githubusercontent.com/chrisjmccormick/nucleus-viz/main/figures/geometry_627/Vocab-03-Softmax.png)
 
-(In this plot anything below ~0.004 is floored to pure black, so the black sea
-really is "essentially zero probability.")
+We're not doing any sort of top-k or top-p filter here, this is just how extreme the probability _cliff_ is surrounding the few top tokens.
 
-Here are the top tokens. The `exp` column is `e^((zᵢ − z_max)/T)` — the
-exponential measured *relative to the top token*. We subtract the max first
-because the absolute exponentials are huge and only ratios matter (this is the
-standard log-sum-exp trick). Divide any `exp` value by the total and you get the
-probability.
+## 3. Temperature: widening (or narrowing) the gaps
 
-| rank | token | logit | logit / 0.6 | exp (rel. to top) | probability | cumulative |
-|-----:|:------|------:|------------:|------------------:|------------:|-----------:|
-| 1 | `The`    | 14.19 | 23.65 | 1.0000 | 0.5809 | 0.5809 |
-| 2 | `To`     | 13.69 | 22.81 | 0.4346 | 0.2525 | 0.8334 |
-| 3 | `Please` | 12.81 | 21.35 | 0.1011 | 0.0587 | 0.8921 |
-| 4 | `Let`    | 12.81 | 21.35 | 0.1011 | 0.0587 | **0.9509** |
-| — | — | — | — | — | — | **← top-p = 0.95 cuts here** |
-| 5 | `Given`  | 12.06 | 20.10 | 0.0290 | 0.0168 | 0.9677 |
-| 6 | `If`     | 11.13 | 18.54 | 0.0061 | 0.0035 | 0.9712 |
-| 7 | `What`   | 11.13 | 18.54 | 0.0061 | 0.0035 | 0.9747 |
-| 8 | `This`   | 11.06 | 18.44 | 0.0055 | 0.0032 | 0.9779 |
-| 9 | `\\`     | 11.00 | 18.33 | 0.0049 | 0.0029 | 0.9808 |
-| 10 | `You`   | 11.00 | 18.33 | 0.0049 | 0.0029 | 0.9836 |
+Now that we understand the additive vs. multiplicative distinction, we can go back to look at how temperature fits in. 
 
-**Sum of `exp (rel. to top)` over all 151,936 tokens = 1.7214.** That single
-number is the entire denominator of the softmax. Notice it's barely above 1.0 —
-the top token alone contributes `1.0` of it, which is exactly why its
-probability is `1.0 / 1.7214 = 0.5809`. The other 151,935 tokens *combined* add
-only 0.72. The drop-off is brutal: by rank 6 the exponential has fallen by more
-than 99% from the top, even though the logit only slipped from 14.19 to 11.13 —
-a gap of just 3 points, turned into a ~165× difference by `e^(3/0.6)`.
+Again, $T$ is a coefficient which we divide all of the logits by before applying SoftMax, and it further sharpens the spike.
+
+Dividing all of the logits by a fraction makes all of them bigger. Crucially, it stretches the additive gaps. Another place where I needed to see a spelled out example. Let's say we have three logit values, 5, 10, and 15, and we apply T=0.6:
+
+| logit | ÷ 0.6 |
+|------:|------:|
+| 15    | 25.00 |
+| 10    | 16.67 |
+| 5     | 8.33  |
+
+Before, the logits were separated by +5 each, and now they're separated by +8.33. In terms of $e^z$, we've increased their separation by ~28x.
+
+Interestingly, if you "don't apply Temperature", that's the same as setting `T=1.0`. In practice, `T=1.0` is considered a high value, you'd only use that if you were trying to force more variety in the responses. Something like `0.8` is more typical for chatbots, and for reasoning we drop it further to `0.6`. 
+
+> Note: I feel pedagogically obligated to point out that "greedy decoding", where we just pick the most probable token, can be achieved mathematically by dropping $T$ all the way down to ~0. That'd be a weird alternative to just argmax-ing over the logits, though! 
+
 
 ## 5. The nucleus: four tokens out of 151,936
 
@@ -209,7 +151,43 @@ distribution the model actually draws its first word from:
 
 `The` ends up carrying **61%** of the nucleus, still parked in the center.
 
+## TODO - Moving down this segment, seems like it fits nucleus better. Also, I didn't write it, needs a redo.
+
+
+Here are the top tokens. The `exp` column is `e^((zᵢ − z_max)/T)` — the
+exponential measured *relative to the top token*. We subtract the max first
+because the absolute exponentials are huge and only ratios matter (this is the
+standard log-sum-exp trick). Divide any `exp` value by the total and you get the
+probability.
+
+| rank | token | logit | logit / 0.6 | exp (rel. to top) | probability | cumulative |
+|-----:|:------|------:|------------:|------------------:|------------:|-----------:|
+| 1 | `The`    | 14.19 | 23.65 | 1.0000 | 0.5809 | 0.5809 |
+| 2 | `To`     | 13.69 | 22.81 | 0.4346 | 0.2525 | 0.8334 |
+| 3 | `Please` | 12.81 | 21.35 | 0.1011 | 0.0587 | 0.8921 |
+| 4 | `Let`    | 12.81 | 21.35 | 0.1011 | 0.0587 | **0.9509** |
+| — | — | — | — | — | — | **← top-p = 0.95 cuts here** |
+| 5 | `Given`  | 12.06 | 20.10 | 0.0290 | 0.0168 | 0.9677 |
+| 6 | `If`     | 11.13 | 18.54 | 0.0061 | 0.0035 | 0.9712 |
+| 7 | `What`   | 11.13 | 18.54 | 0.0061 | 0.0035 | 0.9747 |
+| 8 | `This`   | 11.06 | 18.44 | 0.0055 | 0.0032 | 0.9779 |
+| 9 | `\\`     | 11.00 | 18.33 | 0.0049 | 0.0029 | 0.9808 |
+| 10 | `You`   | 11.00 | 18.33 | 0.0049 | 0.0029 | 0.9836 |
+
+**Sum of `exp (rel. to top)` over all 151,936 tokens = 1.7214.** That single
+number is the entire denominator of the softmax. Notice it's barely above 1.0 —
+the top token alone contributes `1.0` of it, which is exactly why its
+probability is `1.0 / 1.7214 = 0.5809`. The other 151,935 tokens *combined* add
+only 0.72. The drop-off is brutal: by rank 6 the exponential has fallen by more
+than 99% from the top, even though the logit only slipped from 14.19 to 11.13 —
+a gap of just 3 points, turned into a ~165× difference by `e^(3/0.6)`.
+
+
+
+
 ## Takeaway
+
+TODO - I didn't write this, needs redo.
 
 The model scores 151,936 tokens on a smooth, almost continuous-looking scale.
 But softmax runs those scores through `e^x`, which converts gentle additive
@@ -223,12 +201,28 @@ That extreme concentration is exactly what nucleus sampling is built to exploit:
 most of the vocabulary was never in the running to begin with.
 
 
-
-
-
+# ======== END OF DRAFT ========
 
 
 ---
+
+## Dropped - Fixed Offset to Logits doesn't affect softmax
+
+One more property worth noting: softmax only cares about the **differences**
+between logits, not their absolute size. Adding the same constant to every logit
+cancels out in the numerator and denominator. All that matters is how far each
+token sits below the leader. 
+(TODO - You could demonstrate this as: shift the logits to be all positive, 0 - 30 instead of -15 to 15, and the softmax would still be the same.)
+
+## 4. Put them together: the probability collapses
+
+Apply softmax to the temperature-scaled logits — `softmax(logits / 0.6)` — and
+that smooth landscape from step 1 collapses. Almost the entire vocabulary rounds
+to a probability of zero, and a single token lights up dead center:
+
+
+
+**Initial Intro Draft**
 
 In this series of posts, we'll visualize the next token prediction choices of reasoning models, review how "sampling" works, 
 - Language models predict the next token by computing logits over their entire vocabulary--i.e., for every word, there's a calculated value that reflects the model's confidence in that choice.
@@ -240,9 +234,7 @@ In this series of posts, we'll visualize the next token prediction choices of re
 * There are a couple things that are quite striking about these token "nuclei".
 
 
-
-
-geometry/617
+**Alternative Problem**
 
 Number Theory 515
 "What is the smallest positive perfect cube that can be written as the sum of three consecutive integers?"
@@ -251,22 +243,15 @@ Answer: 27
 
 (Because $3^3 = 27$ and $8 + 9 + 10 = 27$)
 
-The full response to this question has xx tokens, of which xx (xx.x%) have singleton nuclei.
-Of the branch tokens, the min, median, max of their nuclei are x / x / x.
 
-> Same AI agent that helps you with the visualization, do this one.
-
-Here is the response from Qwen 2.5 Math 1.5B--a smaller model which has been trained for 'reasoning' about math, just not with explicit < think > tokens.
-
-> Hopefully it's interesting on both fronts
-> It'll be the one we use further down for branch - oracle, so pick based on that?
+# Notes for Subsequent Posts
 
 **Per-Token Losses**
 - For the model to learn, their must be a gap in probability. 
 	- Large gaps produce large gradients, small gaps produce none
 	- For example, if the model already produces a singleton, and we reinforce that choice, there's no gradient.
 - Because RL only trains on responses it produced itself, the training data can only come from this tree of possible responses. 
-- Singletons produce no gradient.
+- Singletons produce no / little gradient.
 - So the only place where there is mathematically any significant learning signal is at these branch tokens.
 - (Note - With teacher forcing / SFT, the data can come from anywhere, and can completely disagree with the model)
 
