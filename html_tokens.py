@@ -114,11 +114,6 @@ def _build_colorbar_html() -> str:
         p = i / 10.0
         stops.append(f"{_blue_at(p ** 0.5)} {i * 10}%")
     gradient = ", ".join(stops)
-    red_swatch = (
-        "<span style=\"display:inline-block; width:14px; height:12px;"
-        " border-radius:3px; border:1px solid rgba(15, 23, 42, 0.18);"
-        " background-color: hsl(0, 75%, 88%);\"></span>"
-    )
     return (
         "<div style='display:flex; align-items:center; gap:8px;"
         " margin:8px 0 14px 0; font-size:12px; color:#334155;'>"
@@ -128,9 +123,71 @@ def _build_colorbar_html() -> str:
         f" border-radius:3px; border:1px solid rgba(15, 23, 42, 0.18);"
         f" background: linear-gradient(to right, {gradient});\"></span>"
         "<span>1.0</span>"
-        f"<span style='margin-left:16px;'>{red_swatch}</span>"
-        f"<span>Outside nucleus</span>"
         "</div>"
+    )
+
+
+# Problem card + stats strip ported from html_token_losses.py so both figures
+# open the same way (problem text, then length/singleton/verdict cards).
+def _build_problem_card(meta: dict) -> str:
+    # Display-only: this problem's TeX is light enough that dropping the $
+    # delimiters reads as plain text.
+    problem = html.escape(meta["problem_text"].replace("$", ""))
+    pid = meta["problem_id"].replace("test/", "").replace(".json", "")
+    return (
+        "<div style='background:#ffffff; border:1px solid rgba(15, 23, 42, 0.12);"
+        " border-left:4px solid #1e3a8a; border-radius:8px; padding:10px 16px;"
+        f" max-width:{DEFAULT_MAX_ROW_WIDTH_PX - 20}px; margin:0 0 10px 0;'>"
+        "<div style='font-size:11px; letter-spacing:0.08em; text-transform:uppercase;"
+        f" color:#64748b; margin-bottom:4px;'>MATH-500 &middot; {pid}</div>"
+        "<div style='font-size:15px; font-family:Georgia, \"Times New Roman\", serif;"
+        f" color:#1e293b;'>{problem}</div>"
+        "</div>"
+    )
+
+
+def _build_stats_html(trace: list[dict], meta: dict) -> str:
+    n = len(trace)
+    singles = sum(1 for s in trace if len(s["nuc_ids"]) == 1)
+    branches = n - singles
+
+    def stat_block(value: str, label: str) -> str:
+        return (
+            "<div style='background:#ffffff; border:1px solid rgba(15, 23, 42, 0.12);"
+            " border-radius:8px; padding:6px 16px; text-align:center;'>"
+            f"<div style='font-size:18px; font-weight:600; color:#1e293b;'>{value}</div>"
+            f"<div style='font-size:11px; color:#64748b;'>{label}</div>"
+            "</div>"
+        )
+
+    if meta["is_correct"]:
+        verdict = (
+            "<div style='background:hsl(140, 45%, 92%); border:1px solid"
+            " hsl(140, 35%, 78%); border-radius:8px; padding:6px 16px;"
+            " text-align:center;'>"
+            "<div style='font-size:18px; font-weight:600; color:#14532d;'>&#10003;"
+            " correct</div>"
+            f"<div style='font-size:11px; color:#3f6212;'>answer {meta['answer']}</div>"
+            "</div>"
+        )
+    else:
+        verdict = (
+            "<div style='background:hsl(0, 55%, 94%); border:1px solid"
+            " hsl(0, 45%, 82%); border-radius:8px; padding:6px 16px;"
+            " text-align:center;'>"
+            "<div style='font-size:18px; font-weight:600; color:#7f1d1d;'>&#10007;"
+            " incorrect</div>"
+            f"<div style='font-size:11px; color:#9f1239;'>answer is {meta['answer']}</div>"
+            "</div>"
+        )
+
+    return (
+        "<div style='display:flex; gap:10px; margin:0 0 12px 0; flex-wrap:wrap;'>"
+        + stat_block(f"{n}", "tokens")
+        + stat_block(f"{singles} ({singles / n:.0%})", "singletons")
+        + stat_block(f"{branches} ({branches / n:.0%})", "branch tokens")
+        + verdict
+        + "</div>"
     )
 
 
@@ -142,13 +199,13 @@ def visualize_columns(
     max_row_width_px: int = DEFAULT_MAX_ROW_WIDTH_PX,
     output_path: Path,
     title: str,
+    heading_html: str = "",
 ) -> Path:
     """Build the token-column HTML and write a standalone UTF-8 document."""
     end = len(cols) if count is None else start + count
     sliced = cols[start:end]
     if not sliced:
         fragment = "<p><em>No tokens in this slice.</em></p>"
-        actual_end = start
     else:
         column_htmls = []
         for column in sliced:
@@ -168,15 +225,9 @@ def visualize_columns(
             + "".join(column_htmls)
             + "</div>"
         )
-        actual_end = start + len(sliced)
-        header_html = (
-            "<div style='margin:0 0 6px 0; font-size:12px; color:#475569;'>"
-            f"Tokens [{start}, {actual_end})"
-            "</div>"
-        )
-        fragment = header_html + _build_colorbar_html() + row_html
+        fragment = _build_colorbar_html() + row_html
 
-    _write_html_file(output_path, fragment, title=title)
+    _write_html_file(output_path, heading_html + fragment, title=title)
     print(f"Wrote HTML: {output_path.resolve()}")
     return output_path
 
@@ -217,17 +268,26 @@ def select_rollout(sample_idx: int) -> dict:
             f"got {len(g)}"
         )
     r = g.iloc[0]
-    if not bool(r.is_correct):
+    if not bool(r.answer_matches):
         print(f"WARNING: selected rollout (sample_idx={sample_idx}) is NOT correct")
     return {
         "unique_id": str(r.unique_id),               # math12k id, for the store lookup
         "completion_token_ids": [int(t) for t in r.completion_token_ids],
         "completion_text": str(r.completion_text),
         "answer": str(r.answer),
-        "num_tokens": int(r.num_tokens),
+        "num_tokens": int(r.completion_num_tokens),
         "sample_idx": int(r.sample_idx),
-        "is_correct": bool(r.is_correct),
+        "is_correct": bool(r.answer_matches),
     }
+
+
+def problem_text() -> str:
+    from math_rollouts.data.problems import load_problems_by_ids
+
+    problems = load_problems_by_ids([UNIQUE_ID])
+    if not problems:
+        raise SystemExit(f"{UNIQUE_ID} not found in math_problems")
+    return str(problems[0]["problem"])
 
 
 def pull_trace_from_store(rollout: dict, *, pool: str = PASSK_NAME) -> tuple[list[dict], dict]:
@@ -291,7 +351,7 @@ def pull_trace_from_store(rollout: dict, *, pool: str = PASSK_NAME) -> tuple[lis
         "sample_idx": rollout["sample_idx"], "is_correct": rollout["is_correct"],
         "num_tokens": rollout["num_tokens"], "gen_config": cfg.as_dict(),
         "eos_id": int(tok.eos_token_id), "completion_text": rollout["completion_text"],
-        "source": "store",
+        "problem_text": problem_text(), "source": "store",
     }
     return trace, meta
 
@@ -356,6 +416,7 @@ def compute_trace(rollout: dict, *, device: str) -> tuple[list[dict], dict]:
         "n_prompt_tokens": len(prompt_ids),
         "eos_id": int(tok.eos_token_id),
         "completion_text": rollout["completion_text"],
+        "problem_text": str(problem["problem"]),
     }
     return trace, meta
 
@@ -434,11 +495,12 @@ def main() -> None:
             trace, meta = compute_trace(rollout, device=device)
         save_trace(args.cache, trace, meta)
 
-    # Drop a trailing EOS step (present when the rollout finished on "stop"): it
-    # sits after the boxed answer and renders as an ugly "<|endoftext|>" chip.
-    eos_id = meta.get("eos_id")
-    while trace and eos_id is not None and trace[-1]["chosen_id"] == eos_id:
-        trace = trace[:-1]
+    # Older caches predate the problem-card heading; backfill so the render
+    # stays offline next time.
+    if "problem_text" not in meta:
+        meta["problem_text"] = problem_text()
+        args.cache.with_suffix(".json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8")
 
     cols = build_columns_from_trace(trace, max_per_col=args.max_per_col)
     pid = meta["problem_id"].replace("test/", "").replace(".json", "")
@@ -449,7 +511,9 @@ def main() -> None:
         f"{verdict}, answer {meta['answer']}) — {MODEL_ID.split('/')[-1]} "
         f"(T={cfg['temperature']}, top_p={cfg['top_p']}, top_k={cfg['top_k']})"
     )
-    visualize_columns(cols, count=args.max_tokens, output_path=args.out, title=title)
+    heading = _build_problem_card(meta) + _build_stats_html(trace, meta)
+    visualize_columns(cols, count=args.max_tokens, output_path=args.out, title=title,
+                      heading_html=heading)
 
 
 if __name__ == "__main__":
