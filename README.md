@@ -19,6 +19,19 @@ header card shows the problem and summary stats (540 tokens, 86% singletons,
 14% branches, correct). The chips wrap to fill the page width, so the full
 response is many screens tall.
 
+`html_tokens.py` regenerates it (from a cached trace, so no GPU is needed), and
+has a few opt-in display modes — with no flags the output is unchanged:
+
+- `--newline-breaks` — lay out **one row per source line** (break after a newline
+  token and before a display-math `\[` opener) instead of wrapping. Each line is
+  non-wrapping and the strip scrolls horizontally, which keeps a line intact and
+  makes the **newline ↔ branch-token** relationship legible (branch tokens cluster
+  at line-starts / sentence openers).
+- `--show-prompt` — render the model's prompt template (system boxed-answer
+  instruction + the problem + the assistant opener) as small grey reference chips
+  after the legend.
+- `--show-positions` — print the 0-based token position above each column.
+
 ## Blog hosting
 
 For the published post, the figures are copied into the blog repo so they're

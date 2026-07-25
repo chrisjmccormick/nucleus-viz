@@ -23,6 +23,13 @@ Usage:
     python html_tokens.py                 # cached trace if present, else store/generate
     python html_tokens.py --regen         # rebuild (store if available, else model)
     python html_tokens.py --source generate --regen   # force the model path
+
+Optional chip-strip modes (all opt-in; the base render is unchanged without them):
+    python html_tokens.py --newline-breaks            # one non-wrapping row per source
+                                                      #   line (newline / display-math \\[),
+                                                      #   scrolling horizontally
+    python html_tokens.py --show-prompt               # prompt-template reference chips
+    python html_tokens.py --show-positions            # token position above each column
 """
 from __future__ import annotations
 
@@ -83,6 +90,153 @@ def render_token_chip(token_str: str, prob: float, is_chosen: bool) -> str:
         f"{prob_text}</span>"
         f"</span>"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Optional chip-strip modes (promoted from
+# agent-ops/nucleus-viz/2026-07-25_0750am_chip-linebreaks-prompt-ref):
+#   --newline-breaks  one row per source line (newline / display-math \[)
+#   --show-prompt     a prompt-template reference strip after the legend
+#   --show-positions  a token-position label above each column
+# All opt-in; with no flags the render is unchanged.
+# --------------------------------------------------------------------------- #
+_BSL = "\\"
+
+
+def render_ref_chip(token_str: str) -> str:
+    """A small, deliberately-quiet reference chip: white bg, soft-grey border + text,
+    token text only (no probability, no shading). Used for the prompt-template strip."""
+    tok = html.escape(token_str).replace(" ", "&nbsp;")
+    if tok == "":
+        tok = "&nbsp;"
+    return (
+        "<span style=\"background:#ffffff; border:1px solid #d8dee6; color:#9aa4b1;"
+        " border-radius:5px; padding:2px 5px; font-family:monospace; font-size:11px;"
+        " line-height:1.25; display:inline-flex; align-items:center;\">"
+        f"{tok}</span>"
+    )
+
+
+def _pos_label(idx: int) -> str:
+    """A small, muted 0-based token-position marker above a column (the alternates below
+    share the same position, so it labels the column, not each alternate)."""
+    return ("<div style='font-size:8px; color:#94a3b8; font-family:monospace;"
+            f" line-height:1; text-align:center; margin-bottom:2px;'>{idx}</div>")
+
+
+def compute_break_before(strs: list[str]) -> list[bool]:
+    """``break_before[i]`` — should column ``i`` start a new visual line?
+
+    * newline: the previous token's text contains ``\\n`` -> break before this one.
+    * display math: a ``\\[`` opener begins here -> break before it. Qwen tokenises ``\\[``
+      as a lone ``\\`` token then a ``[…`` token, so we break before the backslash (keeping
+      ``\\[`` at the start of the equation's own line); the single-token form is handled too.
+    """
+    n = len(strs)
+    bb = [False] * n
+    for i in range(1, n):
+        if "\n" in strs[i - 1]:
+            bb[i] = True
+    for j in range(n):
+        s = strs[j]
+        if (_BSL + "[") in s:
+            bb[j] = True
+        elif s.startswith("[") and j > 0 and strs[j - 1].endswith(_BSL):
+            bb[j - 1] = True
+    if n:
+        bb[0] = False
+    return bb
+
+
+def _group_lines(items: list, break_before: list[bool]) -> list[list]:
+    """Split ``items`` into runs (logical lines) at each ``break_before`` boundary."""
+    lines: list[list] = []
+    cur: list = []
+    for i, it in enumerate(items):
+        if break_before[i] and cur:
+            lines.append(cur)
+            cur = []
+        cur.append(it)
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _column_html(idx: int, column: list, show_pos: bool) -> str:
+    chips = "".join(render_token_chip(t, p, c) for t, p, c in column)
+    head = _pos_label(idx) if show_pos else ""
+    return ("<div style='display:flex; flex-direction:column; gap:3px;"
+            " align-items:stretch; flex:0 0 auto;'>" + head + chips + "</div>")
+
+
+def _render_flow(cols: list, break_before, start: int, max_w: int,
+                 show_pos: bool, wrap_lines: bool) -> str:
+    """Lay out the (already-sliced) columns. ``break_before is None`` -> the legacy single
+    wrap-row. Otherwise one row per source line; ``wrap_lines`` wraps each line at ``max_w``,
+    else each line is non-wrapping and the whole strip scrolls horizontally."""
+    if break_before is None:
+        col_htmls = [_column_html(start + i, c, show_pos) for i, c in enumerate(cols)]
+        return ("<div style='display:flex; flex-flow:row wrap; gap:16px 6px;"
+                f" align-items:flex-start; max-width:{max_w}px;'>" + "".join(col_htmls) + "</div>")
+    lines = _group_lines(list(enumerate(cols)), break_before)
+    flow = "row wrap" if wrap_lines else "row nowrap"
+    cap = f" max-width:{max_w}px;" if wrap_lines else ""
+    line_htmls = [
+        f"<div style='display:flex; flex-flow:{flow}; gap:6px; align-items:flex-start;{cap}'>"
+        + "".join(_column_html(start + i, c, show_pos) for i, c in line) + "</div>"
+        for line in lines
+    ]
+    if wrap_lines:
+        return (f"<div style='display:flex; flex-direction:column; gap:10px; max-width:{max_w}px;'>"
+                + "".join(line_htmls) + "</div>")
+    inner = ("<div style='display:inline-flex; flex-direction:column; gap:10px;"
+             " align-items:flex-start;'>" + "".join(line_htmls) + "</div>")
+    return f"<div style='overflow-x:auto; padding-bottom:8px;'>{inner}</div>"
+
+
+def prompt_template_block(strs: list[str], max_w: int, wrap: bool = False) -> str:
+    """The prompt template as quiet reference chips, one row per template line. ``wrap=False``
+    (default) keeps each line non-wrapping in an ``overflow-x:auto`` strip."""
+    bb = compute_break_before(strs)
+    disp = [s.replace("\n", _NL) for s in strs]
+    lines = _group_lines(disp, bb)
+    flow = "row wrap" if wrap else "row nowrap"
+    cap = f" max-width:{max_w}px;" if wrap else ""
+    line_htmls = [
+        f"<div style='display:flex; flex-flow:{flow}; gap:3px; align-items:center;{cap}'>"
+        + "".join(render_ref_chip(s) for s in line) + "</div>"
+        for line in lines
+    ]
+    label = ("<div style='font-size:11px; letter-spacing:0.06em; text-transform:uppercase;"
+             " color:#94a3b8; margin:2px 0 5px 0;'>prompt template</div>")
+    if wrap:
+        strip = (f"<div style='display:flex; flex-direction:column; gap:3px; max-width:{max_w}px;'>"
+                 + "".join(line_htmls) + "</div>")
+    else:
+        inner = ("<div style='display:inline-flex; flex-direction:column; gap:3px;"
+                 " align-items:flex-start;'>" + "".join(line_htmls) + "</div>")
+        strip = f"<div style='overflow-x:auto; padding-bottom:6px;'>{inner}</div>"
+    return f"<div style='margin:4px 0 16px 0;'>{label}{strip}</div>"
+
+
+def prompt_template_strs(meta: dict, cache_json: Path) -> list[str]:
+    """Tokenise the Qwen-Math prompt template (boxed-instruction system turn + the problem in
+    the user turn + the assistant opener) into per-token strings, cached into the trace's json
+    (``prompt_strs``) so re-renders stay offline."""
+    cached = meta.get("prompt_strs")
+    if cached:
+        return list(cached)
+    from transformers import AutoTokenizer
+
+    from math_rollouts.adapters.qwen_math import apply_qwen_math_template
+
+    tok = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+    ids = tok(apply_qwen_math_template(meta["problem_text"]),
+              add_special_tokens=False).input_ids
+    strs = [tok.decode([i]) for i in ids]
+    meta["prompt_strs"] = strs
+    cache_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return strs
 
 
 def _write_html_file(path: Path, body_fragment: str, title: str = "Token probabilities") -> Path:
@@ -200,32 +354,33 @@ def visualize_columns(
     output_path: Path,
     title: str,
     heading_html: str = "",
+    break_before: list[bool] | None = None,
+    show_pos: bool = False,
+    prompt_html: str = "",
+    wrap_lines: bool = False,
 ) -> Path:
-    """Build the token-column HTML and write a standalone UTF-8 document."""
+    """Build the token-column HTML and write a standalone UTF-8 document.
+
+    Optional modes (all off by default, so the base render is unchanged):
+      * ``break_before`` — a per-column list (aligned to ``cols``); lay out one row per
+        source line instead of a single wrap-column (see ``compute_break_before``).
+      * ``show_pos`` — print the 0-based token position above each column.
+      * ``prompt_html`` — a reference strip inserted right after the colour bar.
+      * ``wrap_lines`` — with ``break_before``, wrap each line at ``max_row_width_px``
+        rather than letting it run on in a horizontally-scrolling strip.
+    """
     end = len(cols) if count is None else start + count
     sliced = cols[start:end]
+    bb = None
+    if break_before is not None:
+        bb = list(break_before[start:end])
+        if bb:
+            bb[0] = False                 # the first shown column never leads with a break
     if not sliced:
         fragment = "<p><em>No tokens in this slice.</em></p>"
     else:
-        column_htmls = []
-        for column in sliced:
-            chips = "".join(
-                render_token_chip(tok_str, p, is_chosen)
-                for tok_str, p, is_chosen in column
-            )
-            column_htmls.append(
-                "<div style='display:flex; flex-direction:column; gap:3px;"
-                " align-items:stretch; flex:0 0 auto;'>"
-                + chips
-                + "</div>"
-            )
-        row_html = (
-            f"<div style='display:flex; flex-flow:row wrap; gap:16px 6px;"
-            f" align-items:flex-start; max-width:{max_row_width_px}px;'>"
-            + "".join(column_htmls)
-            + "</div>"
-        )
-        fragment = _build_colorbar_html() + row_html
+        flow = _render_flow(sliced, bb, start, max_row_width_px, show_pos, wrap_lines)
+        fragment = _build_colorbar_html() + prompt_html + flow
 
     _write_html_file(output_path, heading_html + fragment, title=title)
     print(f"Wrote HTML: {output_path.resolve()}")
@@ -470,6 +625,17 @@ def main() -> None:
                          "model; store: require the store; generate: always recompute")
     ap.add_argument("--regen", action="store_true",
                     help="rebuild the trace even if the cache exists")
+    ap.add_argument("--newline-breaks", action="store_true",
+                    help="lay out one row per source line (break after a newline token and "
+                         "before a display-math \\[ opener) instead of a single wrap-column; "
+                         "each line is non-wrapping and the strip scrolls horizontally")
+    ap.add_argument("--wrap-lines", action="store_true",
+                    help="with --newline-breaks, wrap each line at the max row width instead "
+                         "of scrolling horizontally")
+    ap.add_argument("--show-prompt", action="store_true",
+                    help="show the prompt template as small grey reference chips after the legend")
+    ap.add_argument("--show-positions", action="store_true",
+                    help="print the 0-based token position above each column")
     args = ap.parse_args()
 
     if args.cache.exists() and not args.regen:
@@ -503,6 +669,16 @@ def main() -> None:
             json.dumps(meta, indent=2), encoding="utf-8")
 
     cols = build_columns_from_trace(trace, max_per_col=args.max_per_col)
+
+    break_before = None
+    if args.newline_breaks:
+        break_before = compute_break_before([step["chosen_str"] for step in trace])
+    prompt_html = ""
+    if args.show_prompt:
+        prompt_html = prompt_template_block(
+            prompt_template_strs(meta, args.cache.with_suffix(".json")),
+            DEFAULT_MAX_ROW_WIDTH_PX, wrap=args.wrap_lines)
+
     pid = meta["problem_id"].replace("test/", "").replace(".json", "")
     cfg = meta["gen_config"]
     verdict = "correct" if meta.get("is_correct") else "incorrect"
@@ -513,7 +689,9 @@ def main() -> None:
     )
     heading = _build_problem_card(meta) + _build_stats_html(trace, meta)
     visualize_columns(cols, count=args.max_tokens, output_path=args.out, title=title,
-                      heading_html=heading)
+                      heading_html=heading, break_before=break_before,
+                      show_pos=args.show_positions, prompt_html=prompt_html,
+                      wrap_lines=args.wrap_lines)
 
 
 if __name__ == "__main__":
